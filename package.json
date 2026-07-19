@@ -1,5 +1,5 @@
 {
-  "name": "quoter-api",
+  "name": "quoter-api-backend",
   "version": "0.1.0",
   "private": true,
   "scripts": {

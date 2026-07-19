@@ -6,7 +6,7 @@ export default function Home() {
         Backend service for Quoter. It proxies Google Geocoding and Solar
         requests with server-side keys and delivers completed leads to the
         configured webhook. There is no UI here; the frontend lives in the
-        quoter-widget repository.
+        quoter-widget-frontend repository.
       </p>
       <ul style={{ color: "#3d4148", lineHeight: 2, paddingLeft: 20 }}>
         <li>

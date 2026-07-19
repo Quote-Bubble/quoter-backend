@@ -1,4 +1,4 @@
-# quoter-api
+# quoter-api-backend
 
 The backend service for Quoter. It holds the server-side Google keys and does
 three things:
@@ -9,7 +9,7 @@ three things:
   configured roofer webhook
 
 There is no product UI in this repository. The frontend (the embeddable quote
-bubble and the full quote flow) lives in `quoter-widget` and calls this API
+bubble and the full quote flow) lives in `quoter-widget-frontend` and calls this API
 over HTTP. Every route answers CORS preflights; allowed origins are
 controlled with `QUOTER_ALLOWED_ORIGINS`.
 
@@ -22,7 +22,7 @@ npm install
 npm run dev   # serves on http://localhost:3001
 ```
 
-Port 3001 is the default so `quoter-widget` (port 3000) can point at it
+Port 3001 is the default so `quoter-widget-frontend` (port 3000) can point at it
 locally via `NEXT_PUBLIC_QUOTER_API_URL=http://localhost:3001`.
 
 ## Verification script
@@ -35,7 +35,7 @@ handlers directly, so it needs the `.env.local` keys.
 
 Split out of `quoter-bubble-frontend-backend` (kept as a backup). The files
 `lib/types.ts`, `lib/roof-geometry.ts` and `lib/roof-lines.ts` are copies of
-the canonical versions in `quoter-widget`; they exist here only for the
+the canonical versions in `quoter-widget-frontend`; they exist here only for the
 verification script and the solar route's response typing. If the quote or
-measurement logic changes, update `quoter-widget` first and mirror the change
+measurement logic changes, update `quoter-widget-frontend` first and mirror the change
 here.
