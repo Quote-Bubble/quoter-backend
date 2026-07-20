@@ -1,4 +1,6 @@
 import { preflight, withCors } from "@/lib/cors";
+import { LeadPersistError, persistLead } from "@/lib/leads";
+import { getServiceSupabase } from "@/lib/supabase";
 
 import { randomUUID } from "node:crypto";
 
@@ -15,7 +17,7 @@ const VALID_JOB_TYPES = new Set([
   "other",
 ]);
 
-function isLeadPayload(value: unknown): value is LeadPayload {
+export function isLeadPayload(value: unknown): value is LeadPayload {
   if (!value || typeof value !== "object") return false;
   const payload = value as Partial<LeadPayload>;
   return Boolean(
@@ -42,11 +44,39 @@ async function handlePost(request: Request) {
   }
 
   const leadId = randomUUID();
+  const receivedAt = new Date().toISOString();
   const webhookBody = {
     ...payload,
     leadId,
-    receivedAt: new Date().toISOString(),
+    receivedAt,
   };
+
+  const supabase = getServiceSupabase();
+  if (supabase) {
+    try {
+      await persistLead(supabase, payload, leadId, receivedAt);
+    } catch (error) {
+      if (error instanceof LeadPersistError) {
+        if (error.code === "unknown_roofer") {
+          return NextResponse.json({ error: error.message }, { status: 400 });
+        }
+        console.error("Lead Supabase persist failed", error);
+        return NextResponse.json({ error: error.message }, { status: 502 });
+      }
+      console.error("Lead Supabase persist failed", error);
+      return NextResponse.json(
+        {
+          error:
+            "We could not save your request just now. Please try once more.",
+        },
+        { status: 502 },
+      );
+    }
+  } else {
+    console.warn(
+      "SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not configured; lead not persisted.",
+    );
+  }
 
   const webhookUrl = process.env.LEAD_WEBHOOK_URL;
   if (webhookUrl) {
