@@ -30,10 +30,34 @@ export function isLeadPayload(value: unknown): value is LeadPayload {
   );
 }
 
+// Submitted faster than this (ms) is almost certainly a bot. Kept deliberately
+// low so it never catches a real person — even an autofill user takes ~1s of
+// clicking. The honeypot is the primary signal; this is just a backstop
+// against scripted instant submits (which fire in tens of ms).
+const MIN_HUMAN_FILL_MS = 800;
+
 async function handlePost(request: Request) {
   let payload: LeadPayload;
   try {
-    const body: unknown = await request.json();
+    const body = (await request.json()) as Record<string, unknown>;
+
+    // Spam gate. The widget sends a honeypot field (`_hp`, hidden from humans)
+    // and how long the form was on screen (`_elapsedMs`). A filled honeypot or
+    // an implausibly fast submit means a bot — pretend success so it doesn't
+    // adapt or retry, but drop the junk instead of forwarding it to the roofer.
+    const honeypot = typeof body._hp === "string" ? body._hp.trim() : "";
+    const elapsedMs =
+      typeof body._elapsedMs === "number" ? body._elapsedMs : Infinity;
+    if (honeypot !== "" || elapsedMs < MIN_HUMAN_FILL_MS) {
+      return NextResponse.json(
+        { ok: true, leadId: randomUUID() },
+        { status: 202 },
+      );
+    }
+    // Strip the anti-spam fields so they never reach storage / the webhook.
+    delete body._hp;
+    delete body._elapsedMs;
+
     if (!isLeadPayload(body)) throw new Error("Invalid lead payload");
     payload = body;
   } catch {
