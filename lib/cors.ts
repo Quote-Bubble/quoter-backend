@@ -9,15 +9,32 @@ import { NextResponse } from "next/server";
  * keeps development friction-free; tighten it in production. Note the
  * routes are also protected by their own server-side keys never leaving
  * this app, so CORS here is about controlling who may consume the API.
+ *
+ * Vercel preview URLs for this team's widget
+ * (`https://quoter-widget-frontend-<hash>-quote-bubble.vercel.app`) are
+ * always allowed so preview deploys can call the API without updating env
+ * for every new deployment URL.
  */
 
 type Handler = (request: Request) => Promise<NextResponse> | NextResponse;
+
+const WIDGET_PREVIEW_ORIGIN =
+  /^https:\/\/quoter-widget-frontend-[a-z0-9]+-quote-bubble\.vercel\.app$/i;
 
 function allowedOrigins(): string[] {
   return (process.env.QUOTER_ALLOWED_ORIGINS ?? "*")
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean);
+}
+
+export function isOriginAllowed(origin: string | null): boolean {
+  if (!origin) return false;
+  const allowed = allowedOrigins();
+  if (allowed.includes("*")) return true;
+  if (allowed.includes(origin)) return true;
+  if (WIDGET_PREVIEW_ORIGIN.test(origin)) return true;
+  return false;
 }
 
 function corsHeadersFor(request: Request): Record<string, string> {
@@ -34,7 +51,8 @@ function corsHeadersFor(request: Request): Record<string, string> {
 
   if (allowAny) {
     headers["access-control-allow-origin"] = "*";
-  } else if (origin && allowed.includes(origin)) {
+  } else if (origin && isOriginAllowed(origin)) {
+    // Echo the request origin (required when not using "*").
     headers["access-control-allow-origin"] = origin;
   }
 
