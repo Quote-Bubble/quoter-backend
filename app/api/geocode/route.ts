@@ -18,8 +18,10 @@ async function handlePost(request: Request) {
     );
   }
 
-  const address = body.address?.trim();
-  const postcode = body.postcode?.trim() ?? "";
+  // Cap the inputs before they reach a billed API. No UK address needs this
+  // much room, and without a cap an oversized body is free amplification.
+  const address = body.address?.trim().slice(0, 200);
+  const postcode = body.postcode?.trim().slice(0, 20) ?? "";
   if (!address) {
     return NextResponse.json(
       { error: "Please enter your address." },

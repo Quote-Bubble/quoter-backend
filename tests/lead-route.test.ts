@@ -143,14 +143,33 @@ describe("POST /api/lead", () => {
     );
   });
 
-  it("returns 502 when the webhook fails after persist", async () => {
+  // The widget retries non-2xx responses and also re-sends anything left in
+  // localStorage on the next mount. Reporting a webhook failure after the row
+  // is already in Supabase therefore inserts it again on every retry — one
+  // webhook outage would multiply every lead in the roofer's inbox. Once the
+  // lead is stored it is safe and visible in the dashboard, so delivery
+  // failures are logged, not returned.
+  it("still accepts the lead when the webhook fails after a successful persist", async () => {
     process.env.LEAD_WEBHOOK_URL = "https://hooks.example/lead";
     getServiceSupabase.mockReturnValue({ from: vi.fn() });
     persistLead.mockResolvedValue({ id: "lead" });
     vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 500 }));
 
     const response = await POST(jsonRequest(makeLeadPayload()));
-    expect(response.status).toBe(502);
+    expect(response.status).toBe(202);
     expect(persistLead).toHaveBeenCalled();
+  });
+
+  // With no Supabase configured the webhook is the only delivery path, so its
+  // failure genuinely loses the lead — that one must be reported so the widget
+  // retries.
+  it("returns 502 when the webhook fails and the lead was never persisted", async () => {
+    process.env.LEAD_WEBHOOK_URL = "https://hooks.example/lead";
+    getServiceSupabase.mockReturnValue(null);
+    vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 500 }));
+
+    const response = await POST(jsonRequest(makeLeadPayload()));
+    expect(response.status).toBe(502);
+    expect(persistLead).not.toHaveBeenCalled();
   });
 });

@@ -81,13 +81,17 @@ async function handlePost(request: Request) {
   let coords: LatLng;
   try {
     const body = (await request.json()) as { coords?: LatLng };
+    // Number.isFinite, not typeof: NaN and Infinity are both "number" and
+    // would otherwise be forwarded to Google as a billed request.
     if (
-      typeof body.coords?.lat !== "number" ||
-      typeof body.coords.lng !== "number"
+      !Number.isFinite(body.coords?.lat) ||
+      !Number.isFinite(body.coords?.lng) ||
+      Math.abs(body.coords!.lat) > 90 ||
+      Math.abs(body.coords!.lng) > 180
     ) {
-      throw new Error("Missing coordinates");
+      throw new Error("Invalid coordinates");
     }
-    coords = body.coords;
+    coords = body.coords!;
   } catch {
     return NextResponse.json(
       { error: "Valid property coordinates are required." },

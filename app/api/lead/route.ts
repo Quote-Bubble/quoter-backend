@@ -75,10 +75,13 @@ async function handlePost(request: Request) {
     receivedAt,
   };
 
+  let persisted = false;
+
   const supabase = getServiceSupabase();
   if (supabase) {
     try {
       await persistLead(supabase, payload, leadId, receivedAt);
+      persisted = true;
     } catch (error) {
       if (error instanceof LeadPersistError) {
         if (error.code === "unknown_roofer") {
@@ -118,13 +121,21 @@ async function handlePost(request: Request) {
       }
     } catch (error) {
       console.error("Lead webhook delivery failed", error);
-      return NextResponse.json(
-        {
-          error:
-            "We could not send your request just now. Please try once more.",
-        },
-        { status: 502 },
-      );
+
+      // The lead is already safe in Supabase and will show in the dashboard.
+      // Reporting the webhook failure to the widget would make it retry, and
+      // each retry inserts the row again — a webhook outage would multiply
+      // every lead in the roofer's inbox. Delivery is a side effect of
+      // accepting the lead, not part of accepting it.
+      if (!persisted) {
+        return NextResponse.json(
+          {
+            error:
+              "We could not send your request just now. Please try once more.",
+          },
+          { status: 502 },
+        );
+      }
     }
   } else {
     console.warn("LEAD_WEBHOOK_URL is not configured; lead accepted locally.");
