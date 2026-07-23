@@ -1,4 +1,5 @@
 import { preflight, withCors } from "@/lib/cors";
+import { loggedFetch } from "@/lib/logged-fetch";
 
 import { NextResponse } from "next/server";
 
@@ -121,7 +122,8 @@ async function handlePost(request: Request) {
   });
 
   try {
-    const response = await fetch(
+    const response = await loggedFetch(
+      "google-solar",
       `https://solar.googleapis.com/v1/buildingInsights:findClosest?${params}`,
       {
         cache: "no-store",

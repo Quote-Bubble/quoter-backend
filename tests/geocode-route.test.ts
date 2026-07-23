@@ -69,6 +69,23 @@ describe("POST /api/geocode", () => {
     expect(body.formattedAddress).toBe("12 Braeside Avenue, Merton, SW19 4EH");
   });
 
+  // The street field is free text the widget no longer runs through any
+  // address-validation API, so whatever case the homeowner typed it in
+  // should still come out title-cased in the displayed address.
+  it("title-cases a lower-case street address", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify(POSTCODES_IO_OK), { status: 200 }),
+    );
+
+    const response = await POST(
+      jsonRequest({ address: "2 whitehouse lane", postcode: "HP10 0NR" }),
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.formattedAddress).toBe("2 Whitehouse Lane, Merton, HP10 0NR");
+  });
+
   // The whole point of the swap: the happy path must not touch a billed API.
   it("does not call Google when postcodes.io succeeds", async () => {
     vi.mocked(fetch).mockResolvedValue(
@@ -111,7 +128,10 @@ describe("POST /api/geocode", () => {
     expect(calledHosts()).toEqual(["postcodes.io", "google"]);
   });
 
-  it("falls back to Google when the postcode is not a UK shape", async () => {
+  // Every caller today (the bubble, the standalone AddressStep) validates the
+  // postcode's shape client-side before this route is ever hit, so a bad
+  // shape is rejected outright rather than spending a Google call guessing.
+  it("rejects an invalid-shaped postcode without calling anything", async () => {
     vi.mocked(fetch).mockResolvedValue(
       new Response(JSON.stringify(GOOGLE_OK), { status: 200 }),
     );
@@ -120,8 +140,8 @@ describe("POST /api/geocode", () => {
       jsonRequest({ address: "12 Braeside Avenue", postcode: "not-a-postcode" }),
     );
 
-    expect(response.status).toBe(200);
-    expect(calledHosts()).toEqual(["google"]);
+    expect(response.status).toBe(400);
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
   });
 
   // A real-shaped postcode that doesn't exist is a dead end — paying Google to
@@ -139,8 +159,23 @@ describe("POST /api/geocode", () => {
     expect(calledHosts()).toEqual(["postcodes.io"]);
   });
 
-  it("rejects a missing address", async () => {
+  // The bubble is postcode-only now — no street line is ever sent up front.
+  // A postcode-only request must still resolve, with a district-only label.
+  it("resolves a postcode-only request (no address field) through postcodes.io", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify(POSTCODES_IO_OK), { status: 200 }),
+    );
+
     const response = await POST(jsonRequest({ postcode: "SW19 4EH" }));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.formattedAddress).toBe("Merton, SW19 4EH");
+    expect(calledHosts()).toEqual(["postcodes.io"]);
+  });
+
+  it("rejects a missing postcode", async () => {
+    const response = await POST(jsonRequest({ address: "12 Braeside Avenue" }));
     expect(response.status).toBe(400);
     expect(vi.mocked(fetch)).not.toHaveBeenCalled();
   });

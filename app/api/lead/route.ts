@@ -1,5 +1,6 @@
 import { preflight, withCors } from "@/lib/cors";
 import { LeadPersistError, persistLead } from "@/lib/leads";
+import { loggedFetch } from "@/lib/logged-fetch";
 import { getServiceSupabase } from "@/lib/supabase";
 
 import { randomUUID } from "node:crypto";
@@ -108,7 +109,7 @@ async function handlePost(request: Request) {
   const webhookUrl = process.env.LEAD_WEBHOOK_URL;
   if (webhookUrl) {
     try {
-      const response = await fetch(webhookUrl, {
+      const response = await loggedFetch("lead-webhook", webhookUrl, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(webhookBody),

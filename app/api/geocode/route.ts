@@ -1,4 +1,5 @@
 import { preflight, withCors } from "@/lib/cors";
+import { loggedFetch } from "@/lib/logged-fetch";
 
 import { NextResponse } from "next/server";
 
@@ -53,6 +54,15 @@ function prettyPostcode(compact: string): string {
   return `${compact.slice(0, -3)} ${compact.slice(-3)}`;
 }
 
+/** "2 whitehouse lane" -> "2 Whitehouse Lane" — the street line is free text
+ *  the homeowner typed with no case enforced, so tidy it up for display. */
+function titleCase(value: string): string {
+  return value.replace(
+    /\p{L}[\p{L}'’]*/gu,
+    (word) => word[0].toUpperCase() + word.slice(1).toLowerCase(),
+  );
+}
+
 type PostcodesIoResult = {
   latitude: number;
   longitude: number;
@@ -64,7 +74,8 @@ async function lookupPostcodesIo(
   compact: string,
   address: string,
 ): Promise<GeocodeSuccess | "not_found" | null> {
-  const response = await fetch(
+  const response = await loggedFetch(
+    "postcodes.io",
     `https://api.postcodes.io/postcodes/${encodeURIComponent(compact)}`,
     { cache: "no-store", signal: AbortSignal.timeout(6_000) },
   );
@@ -83,8 +94,15 @@ async function lookupPostcodesIo(
   }
 
   // postcodes.io has no street name, so compose something a roofer can read:
-  // what the homeowner typed, the district, and the tidied postcode.
-  const parts = [address, result.admin_district ?? undefined, prettyPostcode(compact)];
+  // whatever the caller typed (if anything), the district, and the tidied
+  // postcode. The widget itself no longer sends a street line — that now
+  // comes from a one-shot reverse-geocode once the pin is confirmed — but
+  // the field stays optional so this route's contract doesn't narrow.
+  const parts = [
+    address ? titleCase(address) : undefined,
+    result.admin_district ?? undefined,
+    prettyPostcode(compact),
+  ];
   return {
     coords: { lat: result.latitude, lng: result.longitude },
     formattedAddress: parts.filter(Boolean).join(", "),
@@ -100,14 +118,16 @@ async function lookupGoogle(
     process.env.GOOGLE_MAPS_SERVER_API_KEY ?? process.env.GOOGLE_MAPS_API_KEY;
   if (!apiKey) return null;
 
+  const addressQuery = [address, postcode, "UK"].filter(Boolean).join(", ");
   const params = new URLSearchParams({
-    address: postcode ? `${address}, ${postcode}, UK` : `${address}, UK`,
+    address: addressQuery,
     region: "uk",
     components: "country:GB",
     key: apiKey,
   });
 
-  const response = await fetch(
+  const response = await loggedFetch(
+    "google-geocode",
     `https://maps.googleapis.com/maps/api/geocode/json?${params}`,
     { cache: "no-store", signal: AbortSignal.timeout(12_000) },
   );
@@ -146,28 +166,28 @@ async function handlePost(request: Request) {
   }
 
   // Cap the inputs. No UK address needs this much room, and an oversized body
-  // is free amplification against whatever we forward it to.
-  const address = body.address?.trim().slice(0, 200);
+  // is free amplification against whatever we forward it to. `address` is
+  // optional — the widget no longer collects a street line up front; it's
+  // only ever a display extra when a caller happens to provide one.
+  const address = body.address?.trim().slice(0, 200) ?? "";
   const postcode = body.postcode?.trim().slice(0, 20) ?? "";
-  if (!address) {
+
+  const compact = normalisePostcode(postcode);
+  const usable = looksLikeUkPostcode(compact);
+  if (!usable) {
     return NextResponse.json(
-      { error: "Please enter your address." },
+      { error: "Please enter your postcode." },
       { status: 400 },
     );
   }
 
-  const compact = normalisePostcode(postcode);
-  const usable = looksLikeUkPostcode(compact);
-
   let found: GeocodeSuccess | "not_found" | null = null;
 
-  if (usable) {
-    try {
-      found = await lookupPostcodesIo(compact, address);
-    } catch (error) {
-      console.warn("postcodes.io lookup failed, falling back to Google", error);
-      found = null;
-    }
+  try {
+    found = await lookupPostcodesIo(compact, address);
+  } catch (error) {
+    console.warn("postcodes.io lookup failed, falling back to Google", error);
+    found = null;
   }
 
   // null means "couldn't reach it / bad shape" — worth paying Google for.
