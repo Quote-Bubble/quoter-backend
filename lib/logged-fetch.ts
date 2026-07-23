@@ -6,11 +6,17 @@
  */
 export async function loggedFetch(
   label: string,
-  input: string,
+  input: RequestInfo | URL,
   init?: RequestInit,
 ): Promise<Response> {
   const method = init?.method ?? "GET";
-  const { host, pathname } = new URL(input);
+  const url =
+    typeof input === "string"
+      ? input
+      : input instanceof URL
+        ? input.toString()
+        : input.url;
+  const { host, pathname } = new URL(url);
   const start = Date.now();
 
   try {

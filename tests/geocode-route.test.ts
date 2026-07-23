@@ -112,6 +112,17 @@ describe("POST /api/geocode", () => {
     expect(body.formattedAddress).toContain("SW19 4EH");
   });
 
+  it("accepts the special GIR 0AA postcode", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify(POSTCODES_IO_OK), { status: 200 }),
+    );
+
+    const response = await POST(jsonRequest({ postcode: "GIR 0AA" }));
+
+    expect(response.status).toBe(200);
+    expect(String(vi.mocked(fetch).mock.calls[0][0])).toContain("GIR0AA");
+  });
+
   it("falls back to Google when postcodes.io is unreachable", async () => {
     vi.mocked(fetch).mockImplementation(async (input) => {
       if (isPostcodesIo(String(input))) throw new Error("network down");
@@ -172,6 +183,48 @@ describe("POST /api/geocode", () => {
     expect(response.status).toBe(200);
     expect(body.formattedAddress).toBe("Merton, SW19 4EH");
     expect(calledHosts()).toEqual(["postcodes.io"]);
+  });
+
+  it("falls back to Google when postcodes.io returns a malformed success body", async () => {
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      if (isPostcodesIo(String(input))) {
+        return new Response(JSON.stringify({ status: 200 }), { status: 200 });
+      }
+      return new Response(JSON.stringify(GOOGLE_OK), { status: 200 });
+    });
+
+    const response = await POST(jsonRequest({ postcode: "SW19 4EH" }));
+
+    expect(response.status).toBe(200);
+    expect(calledHosts()).toEqual(["postcodes.io", "google"]);
+  });
+
+  it("returns unavailable when Google reports a non-OK API status", async () => {
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      if (isPostcodesIo(String(input))) throw new Error("network down");
+      return new Response(
+        JSON.stringify({ status: "REQUEST_DENIED", results: [] }),
+        { status: 200 },
+      );
+    });
+
+    const response = await POST(jsonRequest({ postcode: "SW19 4EH" }));
+
+    expect(response.status).toBe(502);
+  });
+
+  it("rejects JSON bodies with non-string input fields", async () => {
+    const response = await POST(jsonRequest({ postcode: 123 }));
+
+    expect(response.status).toBe(400);
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
+
+  it("rejects a JSON null body", async () => {
+    const response = await POST(jsonRequest(null));
+
+    expect(response.status).toBe(400);
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
   });
 
   it("rejects a missing postcode", async () => {

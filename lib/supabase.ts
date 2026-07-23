@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { loggedFetch } from "@/lib/logged-fetch";
 
 let cached: SupabaseClient | null | undefined;
 
@@ -19,6 +20,9 @@ export function getServiceSupabase(): SupabaseClient | null {
 
   cached = createClient(url, key, {
     auth: { persistSession: false, autoRefreshToken: false },
+    global: {
+      fetch: (input, init) => loggedFetch("supabase", input, init),
+    },
   });
   return cached;
 }

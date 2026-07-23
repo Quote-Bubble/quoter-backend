@@ -79,6 +79,14 @@ describe("mapLeadToRow", () => {
     const row = mapLeadToRow(payload, "lead", "roofer", "2026-07-20T02:00:00.000Z");
     expect(row.address_formatted).toBe("12 Oakfield Road");
   });
+
+  it("falls back to the postcode for postcode-only leads", () => {
+    const payload = makeLeadPayload({
+      address: { postcode: "LS1 1AA", line: "", formatted: null },
+    });
+    const row = mapLeadToRow(payload, "lead", "roofer", "2026-07-20T02:00:00.000Z");
+    expect(row.address_formatted).toBe("LS1 1AA");
+  });
 });
 
 describe("persistLead", () => {

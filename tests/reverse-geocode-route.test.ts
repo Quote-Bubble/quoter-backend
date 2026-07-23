@@ -63,6 +63,35 @@ describe("POST /api/reverse-geocode", () => {
     expect(body.code).toBe("REVERSE_GEOCODE_NOT_FOUND");
   });
 
+  it("returns unavailable for a Google API error even without results", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(
+        JSON.stringify({ status: "OVER_QUERY_LIMIT", results: [] }),
+        { status: 200 },
+      ),
+    );
+
+    const response = await POST(
+      jsonRequest({ coords: { lat: 51.4141, lng: -0.2123 } }),
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(502);
+    expect(body.code).toBe("REVERSE_GEOCODE_UNAVAILABLE");
+  });
+
+  it("returns unavailable for an OK response without an address result", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ status: "OK", results: [] }), { status: 200 }),
+    );
+
+    const response = await POST(
+      jsonRequest({ coords: { lat: 51.4141, lng: -0.2123 } }),
+    );
+
+    expect(response.status).toBe(502);
+  });
+
   it("rejects invalid coordinates without calling Google", async () => {
     const response = await POST(
       jsonRequest({ coords: { lat: 999, lng: -0.2123 } }),

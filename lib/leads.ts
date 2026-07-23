@@ -53,6 +53,7 @@ export function mapLeadToRow(
     address_formatted:
       payload.address.formatted?.trim() ||
       payload.address.line?.trim() ||
+      payload.address.postcode?.trim() ||
       null,
     address_postcode: payload.address.postcode?.trim() || null,
     quote_min_ex_vat: payload.quoteRange?.minExVat ?? null,

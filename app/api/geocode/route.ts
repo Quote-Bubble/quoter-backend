@@ -46,7 +46,10 @@ function normalisePostcode(value: string): string {
 
 /** Rough UK postcode shape. Rejects junk before it leaves the building. */
 function looksLikeUkPostcode(compact: string): boolean {
-  return /^[A-Z]{1,2}\d[A-Z\d]?\d[A-Z]{2}$/.test(compact);
+  return (
+    compact === "GIR0AA" ||
+    /^[A-Z]{1,2}\d[A-Z\d]?\d[A-Z]{2}$/.test(compact)
+  );
 }
 
 /** "SW194EH" -> "SW19 4EH" for display. */
@@ -88,7 +91,10 @@ async function lookupPostcodesIo(
     result?: PostcodesIoResult | null;
   };
   const result = body.result;
-  if (!result) return "not_found";
+  // postcodes.io uses HTTP 404 for a postcode that does not exist. A 200
+  // without a usable result is a malformed upstream response, so let Google
+  // be the fallback rather than incorrectly reporting a real postcode missing.
+  if (!result) return null;
   if (!Number.isFinite(result.latitude) || !Number.isFinite(result.longitude)) {
     return null;
   }
@@ -142,9 +148,16 @@ async function lookupGoogle(
     }>;
   };
 
-  const result = data.results?.[0];
-  if (data.status === "ZERO_RESULTS" || !result) return "not_found";
+  if (data.status === "ZERO_RESULTS") return "not_found";
   if (data.status !== "OK") return null;
+  const result = data.results?.[0];
+  if (
+    !result ||
+    !Number.isFinite(result.geometry?.location?.lat) ||
+    !Number.isFinite(result.geometry?.location?.lng)
+  ) {
+    return null;
+  }
 
   return {
     coords: result.geometry.location,
@@ -157,7 +170,11 @@ async function lookupGoogle(
 async function handlePost(request: Request) {
   let body: GeocodeRequest;
   try {
-    body = (await request.json()) as GeocodeRequest;
+    const parsed: unknown = await request.json();
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("Invalid request body");
+    }
+    body = parsed as GeocodeRequest;
   } catch {
     return NextResponse.json(
       { error: "Please enter a valid address." },
@@ -169,6 +186,15 @@ async function handlePost(request: Request) {
   // is free amplification against whatever we forward it to. `address` is
   // optional — the widget no longer collects a street line up front; it's
   // only ever a display extra when a caller happens to provide one.
+  if (
+    (body.address !== undefined && typeof body.address !== "string") ||
+    (body.postcode !== undefined && typeof body.postcode !== "string")
+  ) {
+    return NextResponse.json(
+      { error: "Please enter a valid address." },
+      { status: 400 },
+    );
+  }
   const address = body.address?.trim().slice(0, 200) ?? "";
   const postcode = body.postcode?.trim().slice(0, 20) ?? "";
 

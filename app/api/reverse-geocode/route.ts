@@ -74,12 +74,15 @@ async function handlePost(request: Request) {
       results?: Array<{ formatted_address: string; place_id: string }>;
     };
 
-    const result = data.results?.[0];
-    if (data.status === "ZERO_RESULTS" || !result) {
+    if (data.status === "ZERO_RESULTS") {
       return NextResponse.json(NOT_FOUND, { status: 404 });
     }
     if (data.status !== "OK") {
       throw new Error(`Reverse geocode status ${data.status}.`);
+    }
+    const result = data.results?.[0];
+    if (!result || !result.formatted_address || !result.place_id) {
+      throw new Error("Reverse geocode response did not contain an address.");
     }
 
     return NextResponse.json({
