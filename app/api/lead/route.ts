@@ -37,8 +37,12 @@ export function isLeadPayload(value: unknown): value is LeadPayload {
 // against scripted instant submits (which fire in tens of ms).
 const MIN_HUMAN_FILL_MS = 800;
 
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 async function handlePost(request: Request) {
   let payload: LeadPayload;
+  let submissionId: string | null = null;
   try {
     const body = (await request.json()) as Record<string, unknown>;
 
@@ -55,9 +59,18 @@ async function handlePost(request: Request) {
         { status: 202 },
       );
     }
-    // Strip the anti-spam fields so they never reach storage / the webhook.
+
+    // Stable per-submission id from the widget — used as the lead's primary
+    // key so retries / resend-on-mount collapse into one row (idempotency).
+    // Only trust a well-formed UUID; anything else falls back to a fresh id.
+    if (typeof body._submissionId === "string" && UUID_RE.test(body._submissionId)) {
+      submissionId = body._submissionId;
+    }
+
+    // Strip the control fields so they never reach storage / the webhook.
     delete body._hp;
     delete body._elapsedMs;
+    delete body._submissionId;
 
     if (!isLeadPayload(body)) throw new Error("Invalid lead payload");
     payload = body;
@@ -68,7 +81,7 @@ async function handlePost(request: Request) {
     );
   }
 
-  const leadId = randomUUID();
+  const leadId = submissionId ?? randomUUID();
   const receivedAt = new Date().toISOString();
   const webhookBody = {
     ...payload,
@@ -77,12 +90,16 @@ async function handlePost(request: Request) {
   };
 
   let persisted = false;
+  // True only when this call actually created the row. A duplicate resend
+  // (same _submissionId) persists nothing new and must not re-fire the webhook.
+  let insertedNew = false;
 
   const supabase = getServiceSupabase();
   if (supabase) {
     try {
-      await persistLead(supabase, payload, leadId, receivedAt);
+      const result = await persistLead(supabase, payload, leadId, receivedAt);
       persisted = true;
+      insertedNew = result.inserted;
     } catch (error) {
       if (error instanceof LeadPersistError) {
         if (error.code === "unknown_roofer") {
@@ -106,8 +123,13 @@ async function handlePost(request: Request) {
     );
   }
 
+  // Fire the webhook only for a genuinely new lead. On a duplicate resend the
+  // lead was already delivered on the first attempt, so re-firing would double-
+  // notify the roofer. When Supabase isn't configured we can't tell, so fall
+  // back to always delivering (best effort).
+  const shouldDeliver = insertedNew || !supabase;
   const webhookUrl = process.env.LEAD_WEBHOOK_URL;
-  if (webhookUrl) {
+  if (webhookUrl && shouldDeliver) {
     try {
       const response = await loggedFetch("lead-webhook", webhookUrl, {
         method: "POST",
@@ -138,7 +160,7 @@ async function handlePost(request: Request) {
         );
       }
     }
-  } else {
+  } else if (!webhookUrl) {
     console.warn("LEAD_WEBHOOK_URL is not configured; lead accepted locally.");
   }
 

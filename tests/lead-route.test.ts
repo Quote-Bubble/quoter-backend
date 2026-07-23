@@ -79,7 +79,7 @@ describe("POST /api/lead", () => {
 
   it("persists then accepts when Supabase is configured", async () => {
     getServiceSupabase.mockReturnValue({ from: vi.fn() });
-    persistLead.mockResolvedValue({ id: "lead" });
+    persistLead.mockResolvedValue({ row: { id: "lead" }, inserted: true });
 
     const response = await POST(jsonRequest(makeLeadPayload()));
     const body = await response.json();
@@ -127,7 +127,7 @@ describe("POST /api/lead", () => {
   it("forwards to the webhook after a successful persist", async () => {
     process.env.LEAD_WEBHOOK_URL = "https://hooks.example/lead";
     getServiceSupabase.mockReturnValue({ from: vi.fn() });
-    persistLead.mockResolvedValue({ id: "lead" });
+    persistLead.mockResolvedValue({ row: { id: "lead" }, inserted: true });
     vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 200 }));
 
     const response = await POST(jsonRequest(makeLeadPayload()));
@@ -152,12 +152,25 @@ describe("POST /api/lead", () => {
   it("still accepts the lead when the webhook fails after a successful persist", async () => {
     process.env.LEAD_WEBHOOK_URL = "https://hooks.example/lead";
     getServiceSupabase.mockReturnValue({ from: vi.fn() });
-    persistLead.mockResolvedValue({ id: "lead" });
+    persistLead.mockResolvedValue({ row: { id: "lead" }, inserted: true });
     vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 500 }));
 
     const response = await POST(jsonRequest(makeLeadPayload()));
     expect(response.status).toBe(202);
     expect(persistLead).toHaveBeenCalled();
+  });
+
+  // Idempotency: a duplicate resend (same _submissionId) persists nothing new
+  // (inserted:false) — the lead was already delivered on the first attempt, so
+  // the webhook must NOT fire again, but the widget still gets a clean 202.
+  it("does not re-fire the webhook on a duplicate resend", async () => {
+    process.env.LEAD_WEBHOOK_URL = "https://hooks.example/lead";
+    getServiceSupabase.mockReturnValue({ from: vi.fn() });
+    persistLead.mockResolvedValue({ row: { id: "lead" }, inserted: false });
+
+    const response = await POST(jsonRequest(makeLeadPayload()));
+    expect(response.status).toBe(202);
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   // With no Supabase configured the webhook is the only delivery path, so its

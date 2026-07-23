@@ -13,6 +13,9 @@ function mockSupabase(options: {
   roofer?: { id: string } | null;
   rooferError?: { message: string } | null;
   insertError?: { message: string } | null;
+  /** Rows returned by the upsert().select() — empty simulates a duplicate
+   *  resend (ON CONFLICT DO NOTHING inserted nothing). Defaults to one row. */
+  insertedRows?: Array<{ id: string }>;
 }) {
   const maybeSingle = vi.fn().mockResolvedValue({
     data: options.roofer === undefined ? { id: "roofer-uuid" } : options.roofer,
@@ -20,12 +23,17 @@ function mockSupabase(options: {
   });
   const eq = vi.fn().mockReturnValue({ maybeSingle });
   const select = vi.fn().mockReturnValue({ eq });
-  const insert = vi.fn().mockResolvedValue({
+  // leads: .upsert(row, opts).select("id") -> { data, error }
+  const upsertSelect = vi.fn().mockResolvedValue({
+    data: options.insertError
+      ? null
+      : (options.insertedRows ?? [{ id: "lead-uuid" }]),
     error: options.insertError ?? null,
   });
+  const upsert = vi.fn().mockReturnValue({ select: upsertSelect });
   const from = vi.fn((table: string) => {
     if (table === "roofers") return { select };
-    if (table === "leads") return { insert };
+    if (table === "leads") return { upsert };
     throw new Error(`Unexpected table ${table}`);
   });
 
@@ -35,7 +43,8 @@ function mockSupabase(options: {
     select,
     eq,
     maybeSingle,
-    insert,
+    upsert,
+    upsertSelect,
   };
 }
 
@@ -90,13 +99,13 @@ describe("mapLeadToRow", () => {
 });
 
 describe("persistLead", () => {
-  it("looks up the roofer by slug and inserts the mapped row", async () => {
+  it("looks up the roofer by slug and upserts the mapped row", async () => {
     const mock = mockSupabase({
       roofer: { id: "roofer-uuid" },
     });
     const payload = makeLeadPayload({ rooferId: "quoter-landing-demo" });
 
-    const row = await persistLead(
+    const result = await persistLead(
       mock.client,
       payload,
       "lead-uuid",
@@ -106,14 +115,32 @@ describe("persistLead", () => {
     expect(mock.from).toHaveBeenCalledWith("roofers");
     expect(mock.eq).toHaveBeenCalledWith("slug", "quoter-landing-demo");
     expect(mock.from).toHaveBeenCalledWith("leads");
-    expect(mock.insert).toHaveBeenCalledWith(
+    expect(mock.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
         id: "lead-uuid",
         roofer_id: "roofer-uuid",
         contact_name: "Alex Example",
       }),
+      expect.objectContaining({ onConflict: "id", ignoreDuplicates: true }),
     );
-    expect(row.roofer_id).toBe("roofer-uuid");
+    expect(result.row.roofer_id).toBe("roofer-uuid");
+    expect(result.inserted).toBe(true);
+  });
+
+  it("reports inserted:false on a duplicate resend (upsert returns no rows)", async () => {
+    const mock = mockSupabase({
+      roofer: { id: "roofer-uuid" },
+      insertedRows: [], // ON CONFLICT DO NOTHING inserted nothing
+    });
+
+    const result = await persistLead(
+      mock.client,
+      makeLeadPayload(),
+      "lead-uuid",
+      "2026-07-20T02:00:00.000Z",
+    );
+
+    expect(result.inserted).toBe(false);
   });
 
   it("throws unknown_roofer when the slug is missing", async () => {
@@ -127,7 +154,7 @@ describe("persistLead", () => {
       code: "unknown_roofer",
     } satisfies Partial<LeadPersistError>);
 
-    expect(mock.insert).not.toHaveBeenCalled();
+    expect(mock.upsert).not.toHaveBeenCalled();
   });
 
   it("throws lookup_failed when the roofer query errors", async () => {

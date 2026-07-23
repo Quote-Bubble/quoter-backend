@@ -66,13 +66,20 @@ export function mapLeadToRow(
 /**
  * Resolve roofer slug → uuid, then insert the lead.
  * Uses the service-role client (RLS bypass).
+ *
+ * The insert is an upsert with `ignoreDuplicates` keyed on the lead `id`: the
+ * widget generates a stable per-submission id and can resend it (retry /
+ * resend-on-mount), so an insert that conflicts on that id is a resend of a
+ * lead we already have — a no-op, not a new row. `inserted` reports whether
+ * this call actually created the row (false = it was a duplicate resend), so
+ * the caller can avoid re-firing the webhook for a lead already delivered.
  */
 export async function persistLead(
   supabase: SupabaseClient,
   payload: LeadPayload,
   leadId: string,
   receivedAt: string,
-): Promise<LeadRow> {
+): Promise<{ row: LeadRow; inserted: boolean }> {
   const { data: roofer, error: rooferError } = await supabase
     .from("roofers")
     .select("id")
@@ -96,7 +103,12 @@ export async function persistLead(
 
   const row = mapLeadToRow(payload, leadId, roofer.id, receivedAt);
 
-  const { error: insertError } = await supabase.from("leads").insert(row);
+  // ON CONFLICT (id) DO NOTHING. `.select()` returns only genuinely-inserted
+  // rows, so an empty result means this was a duplicate resend.
+  const { data, error: insertError } = await supabase
+    .from("leads")
+    .upsert(row, { onConflict: "id", ignoreDuplicates: true })
+    .select("id");
 
   if (insertError) {
     throw new LeadPersistError(
@@ -106,5 +118,5 @@ export async function persistLead(
     );
   }
 
-  return row;
+  return { row, inserted: (data?.length ?? 0) > 0 };
 }
