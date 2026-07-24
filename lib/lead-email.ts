@@ -134,8 +134,6 @@ export function buildLeadEmail(row: LeadRow): {
     `New roof lead${postcode ? ` in ${postcode}` : ""}`,
     "",
     ...rows.map(([k, v]) => `${k}: ${v}`),
-    "",
-    "Call them while it's warm — they just asked for a quote.",
   ].join("\n");
 
   const tableRows = rows
@@ -154,8 +152,7 @@ export function buildLeadEmail(row: LeadRow): {
     <p style="margin:0 0 4px;font-size:13px;font-weight:600;color:#2f6bff;letter-spacing:.02em">NEW LEAD</p>
     <h1 style="margin:0 0 20px;font-size:20px;color:#111827">${escapeHtml(name)} just requested a quote</h1>
     <table style="border-collapse:collapse;width:100%">${tableRows}</table>
-    <p style="margin:22px 0 0;font-size:14px;color:#374151">Call them while it's warm — they've just asked for a price.</p>
-    <p style="margin:18px 0 0;font-size:12px;color:#9ca3af">Sent by Quoter · reply to this email to reach the customer.</p>
+    <p style="margin:22px 0 0;font-size:12px;color:#9ca3af">Sent by Quoter · reply to this email to reach the customer.</p>
   </div>
 </div>`;
 
