@@ -43,7 +43,7 @@ function corsHeadersFor(request: Request): Record<string, string> {
   const allowAny = allowed.includes("*");
 
   const headers: Record<string, string> = {
-    "access-control-allow-methods": "POST, OPTIONS",
+    "access-control-allow-methods": "GET, POST, OPTIONS",
     "access-control-allow-headers": "content-type",
     "access-control-max-age": "86400",
     vary: "origin",
