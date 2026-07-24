@@ -2,6 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { POST } from "@/app/api/reverse-geocode/route";
 
+vi.mock("@/lib/rate-limit", () => ({
+  limitOr429: vi.fn(async () => null),
+  cacheGet: vi.fn(async () => null),
+  cacheSet: vi.fn(async () => undefined),
+  clientIp: () => "127.0.0.1",
+  resetRateLimitCache: vi.fn(),
+}));
+
 function jsonRequest(body: unknown) {
   return new Request("http://localhost/api/reverse-geocode", {
     method: "POST",
@@ -97,14 +105,16 @@ describe("POST /api/reverse-geocode", () => {
       jsonRequest({ coords: { lat: 999, lng: -0.2123 } }),
     );
 
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ code: "ROOF_NOT_FOUND" });
     expect(vi.mocked(fetch)).not.toHaveBeenCalled();
   });
 
   it("rejects missing coordinates without calling Google", async () => {
     const response = await POST(jsonRequest({}));
 
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ code: "ROOF_NOT_FOUND" });
     expect(vi.mocked(fetch)).not.toHaveBeenCalled();
   });
 

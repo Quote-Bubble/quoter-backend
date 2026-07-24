@@ -1,9 +1,13 @@
 import { preflight, withCors } from "@/lib/cors";
 import { loggedFetch } from "@/lib/logged-fetch";
+import { cacheGet, cacheSet, limitOr429 } from "@/lib/rate-limit";
+import { parseCoords, readJsonBody } from "@/lib/validate";
 
 import { NextResponse } from "next/server";
 
 import type { GeoBounds, LatLng, RoofSegment } from "@/lib/types";
+
+export const maxDuration = 12;
 
 type RawLatLng = {
   latitude?: number;
@@ -44,6 +48,13 @@ type SolarApiResponse = {
   };
 };
 
+const ROOF_NOT_FOUND = {
+  error: "Satellite roof data is not available for this address.",
+  code: "ROOF_NOT_FOUND",
+} as const;
+
+const SOLAR_CACHE_TTL_SECONDS = 60 * 60 * 24 * 14; // 14 days
+
 function normaliseLatLng(value: RawLatLng | undefined): LatLng | null {
   if (
     typeof value?.latitude !== "number" ||
@@ -78,26 +89,36 @@ function normaliseImageryDate(
   ].join("-");
 }
 
+function cacheKey(coords: LatLng): string {
+  return `solar:${coords.lat.toFixed(5)},${coords.lng.toFixed(5)}`;
+}
+
 async function handlePost(request: Request) {
-  let coords: LatLng;
-  try {
-    const body = (await request.json()) as { coords?: LatLng };
-    // Number.isFinite, not typeof: NaN and Infinity are both "number" and
-    // would otherwise be forwarded to Google as a billed request.
-    if (
-      !Number.isFinite(body.coords?.lat) ||
-      !Number.isFinite(body.coords?.lng) ||
-      Math.abs(body.coords!.lat) > 90 ||
-      Math.abs(body.coords!.lng) > 180
-    ) {
-      throw new Error("Invalid coordinates");
-    }
-    coords = body.coords!;
-  } catch {
-    return NextResponse.json(
-      { error: "Valid property coordinates are required." },
-      { status: 400 },
-    );
+  const limited = await limitOr429(request, "solar");
+  if (limited) return limited;
+
+  const bodyResult = await readJsonBody(request);
+  if (!bodyResult.ok) {
+    return NextResponse.json({ error: bodyResult.error }, { status: 400 });
+  }
+
+  const coordsResult = parseCoords(bodyResult.value);
+  if (!coordsResult.ok) {
+    // UK bbox / invalid coords — same shape as a real miss so we don't leak
+    // that the reject was geographic.
+    return NextResponse.json(ROOF_NOT_FOUND, { status: 404 });
+  }
+  const coords = coordsResult.value;
+
+  const cached = await cacheGet<{ scan: unknown }>(cacheKey(coords));
+  if (cached?.scan) {
+    return NextResponse.json({
+      scan: cached.scan,
+      debug:
+        process.env.NODE_ENV === "development"
+          ? { cache: "hit", coords }
+          : undefined,
+    });
   }
 
   const apiKey =
@@ -127,18 +148,12 @@ async function handlePost(request: Request) {
       `https://solar.googleapis.com/v1/buildingInsights:findClosest?${params}`,
       {
         cache: "no-store",
-        signal: AbortSignal.timeout(18_000),
+        signal: AbortSignal.timeout(9_000),
       },
     );
 
     if (response.status === 404) {
-      return NextResponse.json(
-        {
-          error: "Satellite roof data is not available for this address.",
-          code: "ROOF_NOT_FOUND",
-        },
-        { status: 404 },
-      );
+      return NextResponse.json(ROOF_NOT_FOUND, { status: 404 });
     }
 
     if (!response.ok) {
@@ -193,18 +208,22 @@ async function handlePost(request: Request) {
       throw new Error("Solar API response did not contain roof segments.");
     }
 
-    return NextResponse.json({
-      scan: {
-        center,
-        boundingBox,
-        imageryQuality: raw.imageryQuality ?? "UNKNOWN",
-        imageryDate: normaliseImageryDate(raw.imageryDate),
-        wholeRoofStats: {
-          areaMeters2,
-          groundAreaMeters2,
-        },
-        roofSegmentStats,
+    const scan = {
+      center,
+      boundingBox,
+      imageryQuality: raw.imageryQuality ?? "UNKNOWN",
+      imageryDate: normaliseImageryDate(raw.imageryDate),
+      wholeRoofStats: {
+        areaMeters2,
+        groundAreaMeters2,
       },
+      roofSegmentStats,
+    };
+
+    await cacheSet(cacheKey(coords), { scan }, SOLAR_CACHE_TTL_SECONDS);
+
+    return NextResponse.json({
+      scan,
       debug:
         process.env.NODE_ENV === "development"
           ? {
