@@ -1,5 +1,7 @@
 import { preflight, withCors } from "@/lib/cors";
 import { loggedFetch } from "@/lib/logged-fetch";
+import { cacheGet, cacheSet, limitOr429 } from "@/lib/rate-limit";
+import { readJsonBody } from "@/lib/validate";
 
 import { NextResponse } from "next/server";
 
@@ -167,20 +169,27 @@ async function lookupGoogle(
   };
 }
 
+const GEOCODE_CACHE_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
+
 async function handlePost(request: Request) {
-  let body: GeocodeRequest;
-  try {
-    const parsed: unknown = await request.json();
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new Error("Invalid request body");
-    }
-    body = parsed as GeocodeRequest;
-  } catch {
+  const limited = await limitOr429(request, "geocode");
+  if (limited) return limited;
+
+  const bodyResult = await readJsonBody(request);
+  if (!bodyResult.ok) {
     return NextResponse.json(
       { error: "Please enter a valid address." },
       { status: 400 },
     );
   }
+  const parsed = bodyResult.value;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return NextResponse.json(
+      { error: "Please enter a valid address." },
+      { status: 400 },
+    );
+  }
+  const body = parsed as GeocodeRequest;
 
   // Cap the inputs. No UK address needs this much room, and an oversized body
   // is free amplification against whatever we forward it to. `address` is
@@ -205,6 +214,20 @@ async function handlePost(request: Request) {
       { error: "Please enter your postcode." },
       { status: 400 },
     );
+  }
+
+  const geocodeCacheKey = `geocode:${compact}`;
+  const cached = await cacheGet<GeocodeSuccess>(geocodeCacheKey);
+  if (cached?.coords) {
+    return NextResponse.json({
+      coords: cached.coords,
+      formattedAddress: cached.formattedAddress,
+      placeId: cached.placeId,
+      debug:
+        process.env.NODE_ENV === "development"
+          ? { cache: "hit", source: cached.source, postcode: compact }
+          : undefined,
+    });
   }
 
   let found: GeocodeSuccess | "not_found" | null = null;
@@ -233,6 +256,8 @@ async function handlePost(request: Request) {
   if (!found) {
     return NextResponse.json(UNAVAILABLE, { status: 502 });
   }
+
+  await cacheSet(geocodeCacheKey, found, GEOCODE_CACHE_TTL_SECONDS);
 
   return NextResponse.json({
     coords: found.coords,

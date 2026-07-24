@@ -1,25 +1,21 @@
 import { NextResponse } from "next/server";
 
 /**
- * CORS for the split architecture: the quoter-widget frontend (and, later,
- * the widget embedded on roofers' own sites) calls this API from other
- * origins, so every route answers preflights and stamps allow headers.
+ * CORS for the split architecture: the widget (and embeds on roofers' sites)
+ * call this API from other origins, so every route answers preflights and
+ * stamps allow headers.
  *
- * QUOTER_ALLOWED_ORIGINS is a comma-separated origin list. The default "*"
- * keeps development friction-free; tighten it in production. Note the
- * routes are also protected by their own server-side keys never leaving
- * this app, so CORS here is about controlling who may consume the API.
+ * CORS is browser-side defence-in-depth only — it does not authenticate callers
+ * and does not stop curl, scripts, or non-browser clients. The actual controls
+ * are rate limiting (lib/rate-limit.ts) and strict body validation
+ * (lib/validate.ts). QUOTER_ALLOWED_ORIGINS is a comma-separated origin list;
+ * the default "*" keeps development friction-free — tighten it in production.
  *
- * Vercel preview URLs for this team's widget
- * (`https://quoter-widget-frontend-<hash>-quote-bubble.vercel.app`) are
- * always allowed so preview deploys can call the API without updating env
- * for every new deployment URL.
+ * Preview deploys must be enumerated in QUOTER_ALLOWED_ORIGINS. Do not use a
+ * regex against *.vercel.app — the namespace is globally first-come-first-served.
  */
 
 type Handler = (request: Request) => Promise<NextResponse> | NextResponse;
-
-const WIDGET_PREVIEW_ORIGIN =
-  /^https:\/\/quoter-widget-frontend-[a-z0-9]+-quote-bubble\.vercel\.app$/i;
 
 function allowedOrigins(): string[] {
   return (process.env.QUOTER_ALLOWED_ORIGINS ?? "*")
@@ -32,9 +28,7 @@ export function isOriginAllowed(origin: string | null): boolean {
   if (!origin) return false;
   const allowed = allowedOrigins();
   if (allowed.includes("*")) return true;
-  if (allowed.includes(origin)) return true;
-  if (WIDGET_PREVIEW_ORIGIN.test(origin)) return true;
-  return false;
+  return allowed.includes(origin);
 }
 
 function corsHeadersFor(request: Request): Record<string, string> {
@@ -52,11 +46,17 @@ function corsHeadersFor(request: Request): Record<string, string> {
   if (allowAny) {
     headers["access-control-allow-origin"] = "*";
   } else if (origin && isOriginAllowed(origin)) {
-    // Echo the request origin (required when not using "*").
     headers["access-control-allow-origin"] = origin;
   }
 
   return headers;
+}
+
+function stampCors(request: Request, response: NextResponse): NextResponse {
+  for (const [key, value] of Object.entries(corsHeadersFor(request))) {
+    response.headers.set(key, value);
+  }
+  return response;
 }
 
 /** Wrap a route handler so its response carries the CORS headers. */
@@ -64,16 +64,44 @@ export function withCors(
   handler: Handler,
 ): (request: Request) => Promise<NextResponse> {
   return async (request: Request) => {
-    const response = await handler(request);
-    for (const [key, value] of Object.entries(corsHeadersFor(request))) {
-      response.headers.set(key, value);
+    const origin = request.headers.get("origin");
+    const allowAny = allowedOrigins().includes("*");
+
+    // Reject disallowed origins early — do not run the handler and merely omit
+    // the header (that still burns upstream quota / DB writes).
+    if (origin && !allowAny && !isOriginAllowed(origin)) {
+      return stampCors(
+        request,
+        NextResponse.json({ error: "Origin not allowed." }, { status: 403 }),
+      );
     }
-    return response;
+
+    try {
+      const response = await handler(request);
+      return stampCors(request, response);
+    } catch (error) {
+      console.error("Unhandled route error", error);
+      return stampCors(
+        request,
+        NextResponse.json(
+          { error: "An unexpected error occurred." },
+          { status: 500 },
+        ),
+      );
+    }
   };
 }
 
 /** Shared OPTIONS (preflight) handler for every route. */
 export function preflight(request: Request): NextResponse {
+  const origin = request.headers.get("origin");
+  const allowAny = allowedOrigins().includes("*");
+  if (origin && !allowAny && !isOriginAllowed(origin)) {
+    return stampCors(
+      request,
+      NextResponse.json({ error: "Origin not allowed." }, { status: 403 }),
+    );
+  }
   return new NextResponse(null, {
     status: 204,
     headers: corsHeadersFor(request),

@@ -1,35 +1,22 @@
-import { preflight, withCors } from "@/lib/cors";
-import { LeadPersistError, persistLead } from "@/lib/leads";
-import { loggedFetch } from "@/lib/logged-fetch";
-import { getServiceSupabase } from "@/lib/supabase";
-
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 
 import { NextResponse } from "next/server";
 
+import { preflight, withCors } from "@/lib/cors";
+import { LeadPersistError, persistLead } from "@/lib/leads";
+import { loggedFetch, redact } from "@/lib/logged-fetch";
+import { limitOr429 } from "@/lib/rate-limit";
+import { getServiceSupabase } from "@/lib/supabase";
+import {
+  UUID_RE,
+  isLeadPayload,
+  parseLeadBody,
+  readJsonBody,
+} from "@/lib/validate";
+
 import type { LeadPayload } from "@/lib/types";
 
-const VALID_JOB_TYPES = new Set([
-  "full_replacement",
-  "tile_or_slate_repair",
-  "flat_roof_replacement",
-  "leak_investigation",
-  "gutters_fascias_soffits",
-  "other",
-]);
-
-export function isLeadPayload(value: unknown): value is LeadPayload {
-  if (!value || typeof value !== "object") return false;
-  const payload = value as Partial<LeadPayload>;
-  return Boolean(
-    payload.rooferId &&
-      payload.jobType &&
-      VALID_JOB_TYPES.has(payload.jobType) &&
-      payload.contact?.name?.trim() &&
-      payload.contact.phone?.trim() &&
-      payload.timestamp,
-  );
-}
+export { isLeadPayload };
 
 // Submitted faster than this (ms) is almost certainly a bot. Kept deliberately
 // low so it never catches a real person — even an autofill user takes ~1s of
@@ -37,49 +24,167 @@ export function isLeadPayload(value: unknown): value is LeadPayload {
 // against scripted instant submits (which fire in tens of ms).
 const MIN_HUMAN_FILL_MS = 800;
 
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const maxDuration = 15;
+
+type WebhookConfig =
+  | { ok: true; url: string; secret: string | null }
+  | { ok: false; reason: string }
+  | { ok: true; url: null };
+
+let webhookConfigCache: WebhookConfig | undefined;
+let warnedMissingSupabase = false;
+let warnedMissingWebhook = false;
+
+function getWebhookConfig(): WebhookConfig {
+  if (webhookConfigCache !== undefined) return webhookConfigCache;
+
+  const raw = process.env.LEAD_WEBHOOK_URL?.trim();
+  if (!raw) {
+    if (!warnedMissingWebhook) {
+      console.warn("LEAD_WEBHOOK_URL is not configured; lead accepted locally.");
+      warnedMissingWebhook = true;
+    }
+    webhookConfigCache = { ok: true, url: null };
+    return webhookConfigCache;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    console.error("LEAD_WEBHOOK_URL is not a valid URL.");
+    webhookConfigCache = { ok: false, reason: "invalid_url" };
+    return webhookConfigCache;
+  }
+  if (parsed.protocol !== "https:") {
+    console.error("LEAD_WEBHOOK_URL must use https.");
+    webhookConfigCache = { ok: false, reason: "not_https" };
+    return webhookConfigCache;
+  }
+  const allowlist = process.env.LEAD_WEBHOOK_ALLOWED_HOSTS?.trim();
+  const hosts = allowlist
+    ? new Set(
+        allowlist
+          .split(",")
+          .map((h) => h.trim().toLowerCase())
+          .filter(Boolean),
+      )
+    : null;
+  if (hosts && !hosts.has(parsed.host.toLowerCase())) {
+    console.error("LEAD_WEBHOOK_URL host is not in LEAD_WEBHOOK_ALLOWED_HOSTS.");
+    webhookConfigCache = { ok: false, reason: "host_not_allowed" };
+    return webhookConfigCache;
+  }
+  const secret = process.env.LEAD_WEBHOOK_SECRET?.trim() || null;
+  webhookConfigCache = { ok: true, url: raw, secret };
+  return webhookConfigCache;
+}
+
+/** Test helper — clears memoised webhook config between cases. */
+export function resetWebhookConfigCache(): void {
+  webhookConfigCache = undefined;
+  warnedMissingWebhook = false;
+}
+
+function ensureSupabaseWarned(): void {
+  if (warnedMissingSupabase) return;
+  if (
+    !process.env.SUPABASE_URL?.trim() ||
+    !process.env.SUPABASE_SERVICE_ROLE_KEY?.trim()
+  ) {
+    console.warn(
+      "SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not configured; leads will not be persisted.",
+    );
+    warnedMissingSupabase = true;
+  }
+}
+
+function signBody(body: string, secret: string): string {
+  return createHmac("sha256", secret).update(body).digest("hex");
+}
+
+// Exported for tests that assert signature shape.
+export function verifyWebhookSignature(
+  body: string,
+  secret: string,
+  signature: string,
+): boolean {
+  const expected = signBody(body, secret);
+  try {
+    return timingSafeEqual(
+      Buffer.from(expected, "utf8"),
+      Buffer.from(signature, "utf8"),
+    );
+  } catch {
+    return false;
+  }
+}
 
 async function handlePost(request: Request) {
-  let payload: LeadPayload;
-  let submissionId: string | null = null;
-  try {
-    const body = (await request.json()) as Record<string, unknown>;
+  ensureSupabaseWarned();
 
-    // Spam gate. The widget sends a honeypot field (`_hp`, hidden from humans)
-    // and how long the form was on screen (`_elapsedMs`). A filled honeypot or
-    // an implausibly fast submit means a bot — pretend success so it doesn't
-    // adapt or retry, but drop the junk instead of forwarding it to the roofer.
-    const honeypot = typeof body._hp === "string" ? body._hp.trim() : "";
-    const elapsedMs =
-      typeof body._elapsedMs === "number" ? body._elapsedMs : Infinity;
-    if (honeypot !== "" || elapsedMs < MIN_HUMAN_FILL_MS) {
-      return NextResponse.json(
-        { ok: true, leadId: randomUUID() },
-        { status: 202 },
-      );
-    }
+  const limited = await limitOr429(request, "lead-ip");
+  if (limited) return limited;
 
-    // Stable per-submission id from the widget — used as the lead's primary
-    // key so retries / resend-on-mount collapse into one row (idempotency).
-    // Only trust a well-formed UUID; anything else falls back to a fresh id.
-    if (typeof body._submissionId === "string" && UUID_RE.test(body._submissionId)) {
-      submissionId = body._submissionId;
-    }
+  const parsedBody = await readJsonBody(request);
+  if (!parsedBody.ok) {
+    return NextResponse.json({ error: parsedBody.error }, { status: 400 });
+  }
 
-    // Strip the control fields so they never reach storage / the webhook.
-    delete body._hp;
-    delete body._elapsedMs;
-    delete body._submissionId;
-
-    if (!isLeadPayload(body)) throw new Error("Invalid lead payload");
-    payload = body;
-  } catch {
+  if (!parsedBody.value || typeof parsedBody.value !== "object") {
     return NextResponse.json(
       { error: "Please complete your name and phone number." },
       { status: 400 },
     );
   }
+
+  const body = parsedBody.value as Record<string, unknown>;
+
+  // Spam gate. Require _elapsedMs to be present and finite ≥ MIN_HUMAN_FILL_MS;
+  // omitting it used to default to Infinity (pass). Filled honeypot or too-fast
+  // submit → fake 202 so bots don't adapt.
+  const honeypot = typeof body._hp === "string" ? body._hp.trim() : "";
+  const elapsedPresent =
+    typeof body._elapsedMs === "number" && Number.isFinite(body._elapsedMs);
+  const elapsedMs = elapsedPresent ? (body._elapsedMs as number) : null;
+  if (honeypot !== "" || elapsedMs === null || elapsedMs < MIN_HUMAN_FILL_MS) {
+    return NextResponse.json(
+      { ok: true, leadId: randomUUID() },
+      { status: 202 },
+    );
+  }
+
+  // Stable per-submission id from the widget — used as the lead's primary
+  // key so retries / resend-on-mount collapse into one row (idempotency).
+  let submissionId: string | null = null;
+  if (
+    typeof body._submissionId === "string" &&
+    UUID_RE.test(body._submissionId)
+  ) {
+    submissionId = body._submissionId;
+  }
+
+  // Rate-limit distinct submission ids so legitimate retries of the same id
+  // share one slot rather than burning the IP budget.
+  const submissionKey = submissionId ?? randomUUID();
+  const submissionLimited = await limitOr429(
+    request,
+    "lead-submission",
+    submissionKey,
+  );
+  if (submissionLimited) return submissionLimited;
+
+  delete body._hp;
+  delete body._elapsedMs;
+  delete body._submissionId;
+
+  const validated = parseLeadBody(body);
+  if (!validated.ok) {
+    return NextResponse.json({ error: validated.error }, { status: 400 });
+  }
+  const payload: LeadPayload = validated.value;
+
+  const slugLimited = await limitOr429(request, "lead-slug", payload.rooferId);
+  if (slugLimited) return slugLimited;
 
   const leadId = submissionId ?? randomUUID();
   const receivedAt = new Date().toISOString();
@@ -90,8 +195,6 @@ async function handlePost(request: Request) {
   };
 
   let persisted = false;
-  // True only when this call actually created the row. A duplicate resend
-  // (same _submissionId) persists nothing new and must not re-fire the webhook.
   let insertedNew = false;
 
   const supabase = getServiceSupabase();
@@ -103,12 +206,23 @@ async function handlePost(request: Request) {
     } catch (error) {
       if (error instanceof LeadPersistError) {
         if (error.code === "unknown_roofer") {
-          return NextResponse.json({ error: error.message }, { status: 400 });
+          // Same 202 shape as success — do not leak slug existence.
+          console.warn("unknown_roofer_slug", payload.rooferId);
+          return NextResponse.json(
+            { ok: true, leadId },
+            { status: 202 },
+          );
         }
-        console.error("Lead Supabase persist failed", error);
+        console.error("Lead Supabase persist failed", {
+          leadId,
+          ...redact(error),
+        });
         return NextResponse.json({ error: error.message }, { status: 502 });
       }
-      console.error("Lead Supabase persist failed", error);
+      console.error("Lead Supabase persist failed", {
+        leadId,
+        ...redact(error),
+      });
       return NextResponse.json(
         {
           error:
@@ -117,39 +231,40 @@ async function handlePost(request: Request) {
         { status: 502 },
       );
     }
-  } else {
-    console.warn(
-      "SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not configured; lead not persisted.",
-    );
   }
 
-  // Fire the webhook only for a genuinely new lead. On a duplicate resend the
-  // lead was already delivered on the first attempt, so re-firing would double-
-  // notify the roofer. When Supabase isn't configured we can't tell, so fall
-  // back to always delivering (best effort).
   const shouldDeliver = insertedNew || !supabase;
-  const webhookUrl = process.env.LEAD_WEBHOOK_URL;
-  if (webhookUrl && shouldDeliver) {
+  const webhookConfig = getWebhookConfig();
+  if (
+    webhookConfig.ok &&
+    webhookConfig.url &&
+    shouldDeliver
+  ) {
     try {
-      const response = await loggedFetch("lead-webhook", webhookUrl, {
+      const bodyText = JSON.stringify(webhookBody);
+      const headers: Record<string, string> = {
+        "content-type": "application/json",
+      };
+      if (webhookConfig.secret) {
+        headers["x-quoter-signature"] = signBody(
+          bodyText,
+          webhookConfig.secret,
+        );
+      }
+      const response = await loggedFetch("lead-webhook", webhookConfig.url, {
         method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(webhookBody),
+        headers,
+        body: bodyText,
         cache: "no-store",
-        signal: AbortSignal.timeout(12_000),
+        signal: AbortSignal.timeout(5_000),
       });
 
       if (!response.ok) {
         throw new Error(`Lead webhook returned ${response.status}.`);
       }
     } catch (error) {
-      console.error("Lead webhook delivery failed", error);
+      console.error("Lead webhook delivery failed", redact(error));
 
-      // The lead is already safe in Supabase and will show in the dashboard.
-      // Reporting the webhook failure to the widget would make it retry, and
-      // each retry inserts the row again — a webhook outage would multiply
-      // every lead in the roofer's inbox. Delivery is a side effect of
-      // accepting the lead, not part of accepting it.
       if (!persisted) {
         return NextResponse.json(
           {
@@ -160,8 +275,6 @@ async function handlePost(request: Request) {
         );
       }
     }
-  } else if (!webhookUrl) {
-    console.warn("LEAD_WEBHOOK_URL is not configured; lead accepted locally.");
   }
 
   return NextResponse.json({ ok: true, leadId }, { status: 202 });

@@ -29,6 +29,8 @@ export type RoofObstruction = {
   path?: LatLng[];
 };
 export type DrawnRoof = {
+  /** Stable id for React keys / controlled map polygons. */
+  id: string;
   path: LatLng[];
   gutterEdgeIndices: number[];
   obstructions: RoofObstruction[];

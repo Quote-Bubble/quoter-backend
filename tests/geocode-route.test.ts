@@ -2,6 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { POST } from "@/app/api/geocode/route";
 
+vi.mock("@/lib/rate-limit", () => ({
+  limitOr429: vi.fn(async () => null),
+  cacheGet: vi.fn(async () => null),
+  cacheSet: vi.fn(async () => undefined),
+  clientIp: () => "127.0.0.1",
+  resetRateLimitCache: vi.fn(),
+}));
+
 function jsonRequest(body: unknown) {
   return new Request("http://localhost/api/geocode", {
     method: "POST",

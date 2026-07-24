@@ -65,6 +65,93 @@ function ringFromPath(path: LatLng[]): [number, number][] {
   return ring;
 }
 
+/** Proper segment intersection (shared endpoints alone do not count). */
+function segmentsIntersect(
+  a1: LatLng,
+  a2: LatLng,
+  b1: LatLng,
+  b2: LatLng,
+): boolean {
+  const orient = (p: LatLng, q: LatLng, r: LatLng) => {
+    const value =
+      (q.lng - p.lng) * (r.lat - p.lat) - (q.lat - p.lat) * (r.lng - p.lng);
+    if (Math.abs(value) < 1e-15) return 0;
+    return value > 0 ? 1 : 2;
+  };
+  const onSegment = (p: LatLng, q: LatLng, r: LatLng) =>
+    q.lng <= Math.max(p.lng, r.lng) + 1e-15 &&
+    q.lng >= Math.min(p.lng, r.lng) - 1e-15 &&
+    q.lat <= Math.max(p.lat, r.lat) + 1e-15 &&
+    q.lat >= Math.min(p.lat, r.lat) - 1e-15;
+
+  const o1 = orient(a1, a2, b1);
+  const o2 = orient(a1, a2, b2);
+  const o3 = orient(b1, b2, a1);
+  const o4 = orient(b1, b2, a2);
+
+  if (o1 !== o2 && o3 !== o4) return true;
+  if (o1 === 0 && onSegment(a1, b1, a2)) return true;
+  if (o2 === 0 && onSegment(a1, b2, a2)) return true;
+  if (o3 === 0 && onSegment(b1, a1, b2)) return true;
+  if (o4 === 0 && onSegment(b1, a2, b2)) return true;
+  return false;
+}
+
+/**
+ * True when the closed ring does not cross itself. Checks pairwise
+ * non-adjacent edges — fine for the ≤30-vertex outlines we draw.
+ */
+export function isSimpleRing(ring: LatLng[]): boolean {
+  const n = ring.length;
+  if (n < 3) return false;
+
+  for (let i = 0; i < n; i++) {
+    const a1 = ring[i];
+    const a2 = ring[(i + 1) % n];
+    for (let j = i + 1; j < n; j++) {
+      // Skip the same edge and edges that share a vertex (adjacent on the ring).
+      const adjacent =
+        j === i ||
+        (i + 1) % n === j ||
+        (j + 1) % n === i ||
+        (i === 0 && j === n - 1) ||
+        (j === 0 && i === n - 1);
+      if (adjacent) continue;
+      const b1 = ring[j];
+      const b2 = ring[(j + 1) % n];
+      if (segmentsIntersect(a1, a2, b1, b2)) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * True when the intersection of `candidate` with `existing` covers more than
+ * `threshold` (default 10%) of the candidate's area.
+ */
+export function ringsOverlapExcessively(
+  candidate: LatLng[],
+  existing: LatLng[],
+  threshold = 0.1,
+): boolean {
+  const candidateRing = ringFromPath(candidate);
+  const existingRing = ringFromPath(existing);
+  if (candidateRing.length < 4 || existingRing.length < 4) return false;
+  try {
+    const candidateFeature = polygon([candidateRing]);
+    const existingFeature = polygon([existingRing]);
+    const candidateArea = area(candidateFeature);
+    if (candidateArea <= 0) return false;
+    const overlap = intersect(
+      featureCollection([candidateFeature, existingFeature]),
+    );
+    if (!overlap) return false;
+    return area(overlap) / candidateArea > threshold;
+  } catch {
+    return false;
+  }
+}
+
 export function pathFromBounds(bounds: GeoBounds): LatLng[] {
   return [
     { lat: bounds.north, lng: bounds.west },

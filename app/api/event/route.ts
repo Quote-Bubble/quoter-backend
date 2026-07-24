@@ -1,83 +1,62 @@
-import { preflight, withCors } from "@/lib/cors";
-import { getServiceSupabase } from "@/lib/supabase";
-
 import { NextResponse } from "next/server";
 
+import { preflight, withCors } from "@/lib/cors";
+import { limitOr429 } from "@/lib/rate-limit";
+import { getServiceSupabase } from "@/lib/supabase";
+import { parseEventBody, readJsonBody } from "@/lib/validate";
+
 /**
- * Funnel analytics sink for the embedded widget. The widget fires small,
- * fire-and-forget events (widget_opened, step_viewed, quote_shown,
- * lead_submitted, ...) so we can see where homeowners drop off across all the
- * roofer sites the widget is embedded on.
+ * Funnel analytics sink for the embedded widget. Always returns 204 — analytics
+ * failing must be invisible to the homeowner.
  *
- * This endpoint is deliberately forgiving: it always returns 204 and never
- * errors the client, because analytics failing must be invisible. Events are
- * written to Supabase when configured; otherwise they're logged.
- *
- * Requires an `analytics_events` table (nullable roofer_slug — NOT a FK — so
- * unknown/misconfigured embeds still record):
- *
- *   create table if not exists analytics_events (
- *     id uuid primary key default gen_random_uuid(),
- *     event text not null,
- *     roofer_slug text,
- *     session_id text,
- *     source_url text,
- *     props jsonb not null default '{}'::jsonb,
- *     created_at timestamptz not null default now()
- *   );
+ * Table definition lives in quoter-dashboard-frontend migration
+ * 0006_analytics_events.sql (RLS enabled, no anon/authenticated policies).
  */
 
-const KNOWN_EVENTS = new Set([
-  "widget_opened",
-  "widget_closed",
-  "step_viewed",
-  "quote_shown",
-  "lead_submitted",
-  "lead_failed",
-]);
-
-function str(value: unknown, max: number): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  return trimmed.slice(0, max);
-}
-
 async function handlePost(request: Request) {
-  // sendBeacon uses text/plain to skip preflight; request.json() parses the
-  // body regardless of content-type, so both beacon and fetch paths work.
-  let body: Record<string, unknown> | null = null;
-  try {
-    body = (await request.json()) as Record<string, unknown>;
-  } catch {
+  const limited = await limitOr429(request, "event");
+  if (limited) {
+    // Still 204 — don't teach clients about rate limits on analytics.
     return new NextResponse(null, { status: 204 });
   }
 
-  const event = str(body?.event, 64);
-  // Ignore anything that isn't a recognised event name (keeps junk out).
-  if (!event || !KNOWN_EVENTS.has(event)) {
+  const parsed = await readJsonBody(request);
+  if (!parsed.ok) {
     return new NextResponse(null, { status: 204 });
   }
+
+  const eventParsed = parseEventBody(parsed.value);
+  if (!eventParsed.ok) {
+    return new NextResponse(null, { status: 204 });
+  }
+
+  const { event, rooferId, sessionId, sourceUrl, props, clientTs } =
+    eventParsed.value;
+
+  const propsWithTs =
+    clientTs !== null ? { ...props, clientTs } : props;
 
   const row = {
     event,
-    roofer_slug: str(body?.rooferId, 128),
-    session_id: str(body?.sessionId, 128),
-    source_url: str(body?.url, 512),
-    props:
-      body?.props && typeof body.props === "object" ? body.props : {},
-    created_at: str(body?.ts, 40) ?? new Date().toISOString(),
+    roofer_slug: rooferId,
+    session_id: sessionId,
+    source_url: sourceUrl,
+    request_origin: request.headers.get("origin"),
+    props: propsWithTs,
+    // created_at left to DB default (now()) — never trust client ts.
   };
 
   const supabase = getServiceSupabase();
   if (supabase) {
-    try {
-      await supabase.from("analytics_events").insert(row);
-    } catch (error) {
-      console.error("analytics insert failed", error);
+    const { error } = await supabase.from("analytics_events").insert(row);
+    if (error) {
+      console.error("analytics insert failed", {
+        code: error.code,
+        event: row.event,
+      });
     }
   } else {
-    console.info("[event]", row.event, row.roofer_slug, row.props);
+    console.info("[event]", row.event, row.roofer_slug);
   }
 
   return new NextResponse(null, { status: 204 });
