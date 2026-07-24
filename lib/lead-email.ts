@@ -139,20 +139,20 @@ export function buildLeadEmail(row: LeadRow): {
   const tableRows = rows
     .map(
       ([k, v]) =>
-        `<tr><td style="padding:6px 16px 6px 0;color:#6b7280;font-size:13px;white-space:nowrap;vertical-align:top">${escapeHtml(
+        `<tr><td style="padding:11px 24px 11px 0;color:#6b7280;font-size:14px;white-space:nowrap;vertical-align:top">${escapeHtml(
           k,
-        )}</td><td style="padding:6px 0;color:#111827;font-size:15px;font-weight:600">${escapeHtml(
+        )}</td><td style="padding:11px 0;color:#111827;font-size:16px;font-weight:600">${escapeHtml(
           v,
         )}</td></tr>`,
     )
     .join("");
 
-  const html = `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f4f6fb;padding:24px">
-  <div style="max-width:520px;margin:0 auto;background:#fff;border-radius:14px;padding:28px;border:1px solid #eef0f5">
-    <p style="margin:0 0 4px;font-size:13px;font-weight:600;color:#2f6bff;letter-spacing:.02em">NEW LEAD</p>
-    <h1 style="margin:0 0 20px;font-size:20px;color:#111827">${escapeHtml(name)} just requested a quote</h1>
+  const html = `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f4f6fb;padding:32px 20px">
+  <div style="max-width:600px;margin:0 auto;background:#fff;border-radius:16px;padding:40px;border:1px solid #eef0f5">
+    <p style="margin:0 0 6px;font-size:13px;font-weight:700;color:#2f6bff;letter-spacing:.04em">NEW LEAD</p>
+    <h1 style="margin:0 0 28px;font-size:25px;color:#111827">${escapeHtml(name)} just requested a quote</h1>
     <table style="border-collapse:collapse;width:100%">${tableRows}</table>
-    <p style="margin:22px 0 0;font-size:12px;color:#9ca3af">Sent by Quoter · reply to this email to reach the customer.</p>
+    <p style="margin:30px 0 0;font-size:13px;color:#9ca3af">Sent by Quoter · reply to this email to reach the customer.</p>
   </div>
 </div>`;
 
