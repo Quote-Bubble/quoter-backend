@@ -30,6 +30,8 @@ export function makeLeadPayload(
     conditionAnswer: "yes",
     conditionFlagged: false,
     material: "concrete_tile",
+    propertyType: "detached",
+    storeys: 2,
     quoteRange: { minExVat: 4200, maxExVat: 5800 },
     contact: {
       name: "Alex Example",

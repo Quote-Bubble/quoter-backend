@@ -15,10 +15,11 @@ export type PricingMode = "replacement" | "repair" | "roofline";
 export type PropertyType =
   | "detached"
   | "semi_detached"
+  | "end_of_terrace"
   | "terraced"
   | "bungalow"
   | "flat";
-export type StoreyBand = 1 | 2 | 3;
+export type StoreyBand = 1 | 2 | 3 | 4;
 export type RooflineScope = "gutters_only" | "gutters_fascias";
 export type RoofObstructionKind = "chimney" | "rooflight";
 export type RoofObstruction = {
@@ -201,6 +202,8 @@ export type LeadPayload = {
   conditionAnswer: ConditionAnswer | null;
   conditionFlagged: boolean;
   material: Material | null;
+  propertyType: PropertyType | null;
+  storeys: StoreyBand | null;
   quoteRange: {
     minExVat: number;
     maxExVat: number;

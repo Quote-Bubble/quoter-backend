@@ -4,9 +4,11 @@ import type {
   LatLng,
   LeadPayload,
   Material,
+  PropertyType,
   RoofMeasurement,
   RoofType,
   RooflineScope,
+  StoreyBand,
 } from "@/lib/types";
 
 export type ParseOk<T> = { ok: true; value: T };
@@ -49,6 +51,15 @@ const VALID_MATERIALS = new Set<Material>([
   "glass_laminated",
   "felt",
 ]);
+const VALID_PROPERTY_TYPES = new Set<PropertyType>([
+  "detached",
+  "semi_detached",
+  "end_of_terrace",
+  "terraced",
+  "bungalow",
+  "flat",
+]);
+const VALID_STOREYS = new Set<StoreyBand>([1, 2, 3, 4]);
 
 /** UK bounding box — stops the Solar/Geocoding routes acting as a free worldwide proxy. */
 export const UK_BBOX = {
@@ -401,6 +412,24 @@ export function parseLeadBody(body: unknown): ParseResult<LeadPayload> {
     material = m as Material;
   }
 
+  let propertyType: PropertyType | null = null;
+  if (body.propertyType !== null && body.propertyType !== undefined) {
+    const p = asString(body.propertyType, 40);
+    if (!p || !VALID_PROPERTY_TYPES.has(p as PropertyType)) {
+      return fail("Please complete your name and phone number.");
+    }
+    propertyType = p as PropertyType;
+  }
+
+  let storeys: StoreyBand | null = null;
+  if (body.storeys !== null && body.storeys !== undefined) {
+    const s = asFiniteNumber(body.storeys);
+    if (!s || !VALID_STOREYS.has(s as StoreyBand)) {
+      return fail("Please complete your name and phone number.");
+    }
+    storeys = s as StoreyBand;
+  }
+
   let quoteRange: LeadPayload["quoteRange"] = null;
   if (body.quoteRange !== null && body.quoteRange !== undefined) {
     if (!isPlainObject(body.quoteRange)) {
@@ -512,6 +541,8 @@ export function parseLeadBody(body: unknown): ParseResult<LeadPayload> {
       conditionAnswer,
       conditionFlagged,
       material,
+      propertyType,
+      storeys,
       quoteRange,
       contact: { name, phone, email: email ?? "" },
       fallbackReason,
