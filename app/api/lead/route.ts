@@ -3,6 +3,7 @@ import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
 
 import { preflight, withCors } from "@/lib/cors";
+import { sendLeadEmail } from "@/lib/lead-email";
 import { LeadPersistError, persistLead } from "@/lib/leads";
 import { loggedFetch, redact } from "@/lib/logged-fetch";
 import { limitOr429 } from "@/lib/rate-limit";
@@ -14,6 +15,7 @@ import {
   readJsonBody,
 } from "@/lib/validate";
 
+import type { LeadRow } from "@/lib/leads";
 import type { LeadPayload } from "@/lib/types";
 
 export { isLeadPayload };
@@ -196,6 +198,7 @@ async function handlePost(request: Request) {
 
   let persisted = false;
   let insertedNew = false;
+  let leadRow: LeadRow | null = null;
 
   const supabase = getServiceSupabase();
   if (supabase) {
@@ -203,6 +206,7 @@ async function handlePost(request: Request) {
       const result = await persistLead(supabase, payload, leadId, receivedAt);
       persisted = true;
       insertedNew = result.inserted;
+      leadRow = result.row;
     } catch (error) {
       if (error instanceof LeadPersistError) {
         if (error.code === "unknown_roofer") {
@@ -274,6 +278,18 @@ async function handlePost(request: Request) {
           { status: 502 },
         );
       }
+    }
+  }
+
+  // Email the roofer about genuinely-new leads. Best-effort: the lead is
+  // already saved, so a mail failure must never fail the request. Needs the
+  // service-role client (to read the roofer's linked login emails), so it only
+  // runs when we persisted here.
+  if (supabase && insertedNew && leadRow) {
+    try {
+      await sendLeadEmail(supabase, leadRow);
+    } catch (error) {
+      console.error("Lead email delivery failed", redact(error));
     }
   }
 
